@@ -124,12 +124,31 @@ Debe mostrar:
 ### Iniciar el bot
 
 ```powershell
-python bot.py
+python -m logic.bot
+```
+
+O en segundo plano (bot + dashboard, sin ventanas):
+
+```powershell
+.\start_botgold.bat   # iniciar
+.\stop_botgold.bat    # detener
+```
+
+### Estructura del proyecto
+
+```
+botgold-ms/
+├── config/    # configuracion y credenciales (.env no versionado)
+├── model/     # estrategia de trading y backtests
+├── logic/     # motor del bot en vivo
+├── utils/     # conector MT5, persistencia de estado, test de conexion
+├── mql5/      # EA Bridge y scripts MQL5
+└── data/      # estado runtime para el dashboard (no versionado)
 ```
 
 El bot:
 - Se conecta al EA Bridge cada 60 segundos
-- Descarga velas H4 de XAU/USD vía yfinance
+- Lee velas H4 reales del broker exportadas por el EA
 - Calcula todos los indicadores de la Estrategia D
 - Ejecuta órdenes cuando se cumplen todas las condiciones de entrada
 - Aplica trailing stop barra a barra

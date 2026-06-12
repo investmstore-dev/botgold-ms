@@ -1,4 +1,4 @@
-import mt5_connector as m
+from utils import mt5_connector as m
 import json
 from pathlib import Path
 

@@ -6,9 +6,9 @@ import time
 import logging
 from datetime import datetime
 
-import mt5_connector as mt5c
-import strategy as strat
-import state_manager as sm
+from utils import mt5_connector as mt5c
+from model import strategy as strat
+from utils import state_manager as sm
 from config import SYMBOL, TIMEFRAME, RISK_PCT, MAX_POSITIONS, ATR_SL_MULT
 
 logging.basicConfig(
