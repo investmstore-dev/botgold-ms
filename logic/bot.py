@@ -9,6 +9,7 @@ from datetime import datetime
 from utils import mt5_connector as mt5c
 from model import strategy as strat
 from utils import state_manager as sm
+from utils import notifier
 from config import SYMBOL, TIMEFRAME, RISK_PCT, MAX_POSITIONS, ATR_SL_MULT
 
 logging.basicConfig(
@@ -23,9 +24,15 @@ logger = logging.getLogger(__name__)
 
 INITIAL_BALANCE = None   # Se fija al conectar
 
+# Estado para notificaciones (evita duplicados y detecta cierres)
+_last_pos        = None    # snapshot de la ultima posicion abierta vista
+_alerted_dd      = False
+_alerted_daily   = None    # fecha del ultimo aviso de DD diario
+_alerted_target  = False
+
 
 def run_cycle():
-    global INITIAL_BALANCE
+    global INITIAL_BALANCE, _last_pos, _alerted_dd, _alerted_daily, _alerted_target
 
     # --- Datos de cuenta ---
     account = mt5c.get_account()
@@ -43,14 +50,24 @@ def run_cycle():
     # --- Guardia FTMO ---
     if ftmo["dd_violated"]:
         logger.error("DRAWDOWN MAXIMO VIOLADO — Bot detenido")
+        if not _alerted_dd:
+            notifier.notify_dd_violated(ftmo)
+            _alerted_dd = True
         sm.save_state(account, "HALTED_DD", None, ftmo)
         return
     if ftmo["daily_dd_violated"]:
         logger.warning("Drawdown diario alcanzado — sin nuevas entradas hoy")
+        today = datetime.now().date()
+        if _alerted_daily != today:
+            notifier.notify_daily_dd(ftmo)
+            _alerted_daily = today
         sm.save_state(account, "HALTED_DAILY", None, ftmo)
         return
     if ftmo["target_reached"]:
         logger.info("OBJETIVO FTMO ALCANZADO — +%.2f%%", ftmo["profit_pct"])
+        if not _alerted_target:
+            notifier.notify_target_reached(ftmo)
+            _alerted_target = True
         sm.save_state(account, "TARGET_REACHED", None, ftmo)
         return
 
@@ -70,25 +87,36 @@ def run_cycle():
     positions = mt5c.get_open_positions(SYMBOL)
     active_trade = None
 
-    if positions:
-        pos = positions[0]
-        new_sl = strat.calc_trailing_sl(
-            "long" if pos.type == 0 else "short", ema21, atr
+    # Detectar cierre: habia posicion y ya no esta (SL / trailing ejecutado)
+    if _last_pos and not positions:
+        pnl = _last_pos.get("profit", 0)
+        notifier.notify_trade_close(
+            _last_pos, _last_pos.get("current_sl", 0), pnl,
+            account["balance"], "Stop Loss / Trailing Stop"
         )
+        logger.info("Posicion cerrada detectada | PnL aprox: %.2f", pnl)
+        _last_pos = None
+
+    if positions:
+        pos = positions[0]   # dict del EA: ticket, type ("long"/"short"), sl, ...
+        ptype  = pos.get("type", "long")
+        cur_sl = pos.get("sl", 0)
+        new_sl = strat.calc_trailing_sl(ptype, ema21, atr)
         # Solo mover SL a favor nunca en contra
-        if pos.type == 0 and new_sl > pos.sl:       # long: subir SL
-            mt5c.modify_sl(pos.ticket, new_sl)
-        elif pos.type == 1 and new_sl < pos.sl:      # short: bajar SL
-            mt5c.modify_sl(pos.ticket, new_sl)
+        if ptype == "long" and new_sl > cur_sl:
+            mt5c.modify_sl(pos.get("ticket"), new_sl)
+        elif ptype == "short" and (cur_sl == 0 or new_sl < cur_sl):
+            mt5c.modify_sl(pos.get("ticket"), new_sl)
 
         active_trade = {
-            "ticket":    pos.ticket,
-            "type":      "long" if pos.type == 0 else "short",
-            "open_price": pos.price_open,
-            "current_sl": pos.sl,
-            "profit":    pos.profit,
-            "volume":    pos.volume,
+            "ticket":     pos.get("ticket"),
+            "type":       ptype,
+            "open_price": pos.get("open_price", 0),
+            "current_sl": cur_sl,
+            "profit":     pos.get("profit", 0),
+            "volume":     pos.get("volume", 0),
         }
+        _last_pos = active_trade
         sm.save_state(account, "holding", active_trade, ftmo)
         return
 
@@ -115,14 +143,15 @@ def run_cycle():
     result = mt5c.open_order(SYMBOL, signal, lot, sl)
     if "error" not in result:
         trade_record = {
-            "ticket":     result["ticket"],
+            "ticket":     result.get("ticket"),
             "type":       signal,
-            "open_price": result["price"],
+            "open_price": close,   # precio de referencia (cierre de vela)
             "lot":        lot,
             "sl":         sl,
             "atr":        atr,
         }
         sm.append_trade(trade_record)
+        notifier.notify_trade_open(trade_record)
         active_trade = trade_record
 
     sm.save_state(account, signal, active_trade, ftmo)
