@@ -1,0 +1,162 @@
+"""
+BOT Mining Store GOLD — Motor principal
+Estrategia D: BB Breakout + SMA50 | XAU/USD H4
+"""
+import time
+import logging
+from datetime import datetime
+
+import mt5_connector as mt5c
+import strategy as strat
+import state_manager as sm
+from config import SYMBOL, TIMEFRAME, RISK_PCT, MAX_POSITIONS, ATR_SL_MULT
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("data/bot.log"),
+        logging.StreamHandler(),
+    ]
+)
+logger = logging.getLogger(__name__)
+
+INITIAL_BALANCE = None   # Se fija al conectar
+
+
+def run_cycle():
+    global INITIAL_BALANCE
+
+    # --- Datos de cuenta ---
+    account = mt5c.get_account()
+    if not account:
+        logger.warning("No se pudo obtener cuenta MT5")
+        return
+
+    if INITIAL_BALANCE is None:
+        INITIAL_BALANCE = account["balance"]
+        logger.info("Balance inicial fijado: %.2f", INITIAL_BALANCE)
+
+    sm.append_equity(account["equity"], account["balance"])
+    ftmo = sm.calc_ftmo_status(account, INITIAL_BALANCE)
+
+    # --- Guardia FTMO ---
+    if ftmo["dd_violated"]:
+        logger.error("DRAWDOWN MAXIMO VIOLADO — Bot detenido")
+        sm.save_state(account, "HALTED_DD", None, ftmo)
+        return
+    if ftmo["daily_dd_violated"]:
+        logger.warning("Drawdown diario alcanzado — sin nuevas entradas hoy")
+        sm.save_state(account, "HALTED_DAILY", None, ftmo)
+        return
+    if ftmo["target_reached"]:
+        logger.info("OBJETIVO FTMO ALCANZADO — +%.2f%%", ftmo["profit_pct"])
+        sm.save_state(account, "TARGET_REACHED", None, ftmo)
+        return
+
+    # --- Velas e indicadores ---
+    df = mt5c.get_candles(SYMBOL, TIMEFRAME, count=200)
+    if df.empty:
+        logger.warning("Sin datos de velas")
+        return
+    df = strat.compute_indicators(df)
+
+    curr = df.iloc[-1]
+    atr    = curr["atr"]
+    ema21  = curr["ema21"]
+    close  = curr["close"]
+
+    # --- Gestionar posicion abierta (trailing stop) ---
+    positions = mt5c.get_open_positions(SYMBOL)
+    active_trade = None
+
+    if positions:
+        pos = positions[0]
+        new_sl = strat.calc_trailing_sl(
+            "long" if pos.type == 0 else "short", ema21, atr
+        )
+        # Solo mover SL a favor nunca en contra
+        if pos.type == 0 and new_sl > pos.sl:       # long: subir SL
+            mt5c.modify_sl(pos.ticket, new_sl)
+        elif pos.type == 1 and new_sl < pos.sl:      # short: bajar SL
+            mt5c.modify_sl(pos.ticket, new_sl)
+
+        active_trade = {
+            "ticket":    pos.ticket,
+            "type":      "long" if pos.type == 0 else "short",
+            "open_price": pos.price_open,
+            "current_sl": pos.sl,
+            "profit":    pos.profit,
+            "volume":    pos.volume,
+        }
+        sm.save_state(account, "holding", active_trade, ftmo)
+        return
+
+    # --- Buscar nueva entrada ---
+    if len(positions) >= MAX_POSITIONS:
+        sm.save_state(account, "max_positions", active_trade, ftmo)
+        return
+
+    signal = strat.check_entry(df)
+    if signal is None:
+        sm.save_state(account, "no_signal", None, ftmo)
+        return
+
+    # Calcular SL y lote
+    if signal == "long":
+        sl = close - ATR_SL_MULT * atr
+    else:
+        sl = close + ATR_SL_MULT * atr
+
+    lot = strat.calc_lot_size(account["balance"], atr, close, RISK_PCT)
+    logger.info("Señal: %s | close=%.2f | sl=%.2f | atr=%.2f | lot=%.2f",
+                signal, close, sl, atr, lot)
+
+    result = mt5c.open_order(SYMBOL, signal, lot, sl)
+    if "error" not in result:
+        trade_record = {
+            "ticket":     result["ticket"],
+            "type":       signal,
+            "open_price": result["price"],
+            "lot":        lot,
+            "sl":         sl,
+            "atr":        atr,
+        }
+        sm.append_trade(trade_record)
+        active_trade = trade_record
+
+    sm.save_state(account, signal, active_trade, ftmo)
+
+
+def main():
+    logger.info("=== BOT Mining Store GOLD iniciando ===")
+
+    if not mt5c.connect():
+        logger.error("No se pudo conectar a MT5. Verifica que MT5 este abierto.")
+        return
+
+    import os
+    os.makedirs("data", exist_ok=True)
+
+    try:
+        while True:
+            now = datetime.now()
+            logger.info("--- Ciclo %s ---", now.strftime("%Y-%m-%d %H:%M:%S"))
+            try:
+                run_cycle()
+            except Exception as e:
+                logger.exception("Error en ciclo: %s", e)
+
+            # Esperar 60 segundos entre ciclos (H4 = nueva vela cada 4h,
+            # pero chequeamos cada minuto para trailing stop y guardia FTMO)
+            time.sleep(60)
+
+    except KeyboardInterrupt:
+        logger.info("Bot detenido por usuario")
+    finally:
+        mt5c.disconnect()
+        logger.info("Desconectado de MT5")
+
+
+if __name__ == "__main__":
+    main()
