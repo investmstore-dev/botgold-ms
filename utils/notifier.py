@@ -85,6 +85,46 @@ def notify_trade_close(trade: dict, exit_price: float, pnl: float,
     )
 
 
+# -- Reporte diario --------------------------------------------------------------
+
+def notify_daily_report(account: dict, ftmo: dict, trades_today: list):
+    """Resumen diario (20:00 UTC). trades_today: lista de dicts con type/pnl/..."""
+    balance = account.get("balance", 0)
+    equity  = account.get("equity", 0)
+
+    n       = len(trades_today)
+    wins    = sum(1 for t in trades_today if t.get("pnl", 0) > 0)
+    pnl_day = sum(t.get("pnl", 0) for t in trades_today)
+
+    lines = [
+        "📋 <b>REPORTE DIARIO — BOT GOLD</b> 🥇",
+        "━━━━━━━━━━━━━━━━━━",
+        "🤖 XAU/USD H4 — Estrategia D",
+        f"💼 Balance: <b>${balance:,.2f}</b>",
+        f"📊 Equity: ${equity:,.2f}",
+        f"📈 Progreso FTMO: {ftmo.get('profit_pct', 0):+.2f}% / "
+        f"{ftmo.get('target_pct', 10):.0f}% objetivo",
+        f"🔻 DD maximo: {ftmo.get('max_dd_pct', 0):.2f}% "
+        f"(limite -{ftmo.get('dd_limit_pct', 10):.0f}%)",
+        "",
+        f"🎯 Trades hoy: {n}" + (f" ({wins} ganados, {n - wins} perdidos)" if n else ""),
+    ]
+    if n:
+        lines.append(f"💰 PnL del dia: <b>${pnl_day:+,.2f}</b>")
+        for t in trades_today:
+            e = "✅" if t.get("pnl", 0) >= 0 else "❌"
+            lines.append(
+                f"  {e} {t.get('type', '?').upper()} "
+                f"${t.get('entry', 0):,.0f} → ${t.get('exit', 0):,.0f} "
+                f"= ${t.get('pnl', 0):+,.2f}"
+            )
+    else:
+        lines.append("😴 Sin operaciones (sin senal valida)")
+
+    lines += ["", "🤖 Bot activo — mercado XAU/USD 24/5"]
+    send("\n".join(lines))
+
+
 # -- Alertas FTMO ----------------------------------------------------------------
 
 def notify_dd_violated(ftmo: dict):

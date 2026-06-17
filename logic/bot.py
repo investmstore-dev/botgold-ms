@@ -2,15 +2,16 @@
 BOT Mining Store GOLD — Motor principal
 Estrategia D: BB Breakout + SMA50 | XAU/USD H4
 """
+import os
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from utils import mt5_connector as mt5c
 from model import strategy as strat
 from utils import state_manager as sm
 from utils import notifier
-from config import SYMBOL, TIMEFRAME, RISK_PCT, MAX_POSITIONS, ATR_SL_MULT
+from config import SYMBOL, TIMEFRAME, RISK_PCT, MAX_POSITIONS, ATR_SL_MULT, DATA_DIR
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,9 +31,35 @@ _alerted_dd      = False
 _alerted_daily   = None    # fecha del ultimo aviso de DD diario
 _alerted_target  = False
 
+# Reporte diario (20:00 UTC, una vez al dia, persistido para sobrevivir reinicios)
+REPORT_HOUR_UTC  = 20
+_REPORT_MARKER   = os.path.join(DATA_DIR, "last_report.txt")
+_last_report_date = None
+_trades_today     = []     # trades cerrados hoy (para el reporte)
+
+
+def _maybe_daily_report(account: dict, ftmo: dict):
+    """Envia el reporte diario una vez al dia despues de las 20:00 UTC.
+    La fecha se persiste en disco para no duplicar tras reinicios."""
+    global _last_report_date, _trades_today
+    now = datetime.now(timezone.utc)
+    if now.hour < REPORT_HOUR_UTC:
+        return
+    if _last_report_date is None and os.path.exists(_REPORT_MARKER):
+        with open(_REPORT_MARKER) as f:
+            _last_report_date = f.read().strip()
+    if _last_report_date == str(now.date()):
+        return
+    _last_report_date = str(now.date())
+    with open(_REPORT_MARKER, "w") as f:
+        f.write(_last_report_date)
+    notifier.notify_daily_report(account, ftmo, _trades_today)
+    logger.info("Reporte diario enviado (%d trades hoy)", len(_trades_today))
+    _trades_today = []
+
 
 def run_cycle():
-    global INITIAL_BALANCE, _last_pos, _alerted_dd, _alerted_daily, _alerted_target
+    global INITIAL_BALANCE, _last_pos, _alerted_dd, _alerted_daily, _alerted_target, _trades_today
 
     # --- Datos de cuenta ---
     account = mt5c.get_account()
@@ -46,6 +73,9 @@ def run_cycle():
 
     sm.append_equity(account["equity"], account["balance"])
     ftmo = sm.calc_ftmo_status(account, INITIAL_BALANCE)
+
+    # Reporte diario (se evalua antes de las guardias para enviarse siempre)
+    _maybe_daily_report(account, ftmo)
 
     # --- Guardia FTMO ---
     if ftmo["dd_violated"]:
@@ -90,10 +120,17 @@ def run_cycle():
     # Detectar cierre: habia posicion y ya no esta (SL / trailing ejecutado)
     if _last_pos and not positions:
         pnl = _last_pos.get("profit", 0)
+        exit_px = _last_pos.get("current_sl", 0)
         notifier.notify_trade_close(
-            _last_pos, _last_pos.get("current_sl", 0), pnl,
+            _last_pos, exit_px, pnl,
             account["balance"], "Stop Loss / Trailing Stop"
         )
+        _trades_today.append({
+            "type":  _last_pos.get("type", "?"),
+            "entry": _last_pos.get("open_price", 0),
+            "exit":  exit_px,
+            "pnl":   pnl,
+        })
         logger.info("Posicion cerrada detectada | PnL aprox: %.2f", pnl)
         _last_pos = None
 
