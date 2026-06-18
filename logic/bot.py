@@ -27,6 +27,7 @@ INITIAL_BALANCE = None   # Se fija al conectar
 
 # Estado para notificaciones (evita duplicados y detecta cierres)
 _last_pos        = None    # snapshot de la ultima posicion abierta vista
+_balance_at_entry = None   # balance de la cuenta al abrir la posicion actual
 _alerted_dd      = False
 _alerted_daily   = None    # fecha del ultimo aviso de DD diario
 _alerted_target  = False
@@ -59,7 +60,7 @@ def _maybe_daily_report(account: dict, ftmo: dict):
 
 
 def run_cycle():
-    global INITIAL_BALANCE, _last_pos, _alerted_dd, _alerted_daily, _alerted_target, _trades_today
+    global INITIAL_BALANCE, _last_pos, _balance_at_entry, _alerted_dd, _alerted_daily, _alerted_target, _trades_today
 
     # --- Datos de cuenta ---
     account = mt5c.get_account()
@@ -119,7 +120,13 @@ def run_cycle():
 
     # Detectar cierre: habia posicion y ya no esta (SL / trailing ejecutado)
     if _last_pos and not positions:
-        pnl = _last_pos.get("profit", 0)
+        # PnL robusto: delta del balance de la cuenta desde la entrada.
+        # El 'profit' flotante del EA queda stale al cerrar (mostraba $0.00);
+        # al cerrarse la posicion, el PnL realizado ya esta en el balance.
+        if _balance_at_entry is not None:
+            pnl = round(account["balance"] - _balance_at_entry, 2)
+        else:
+            pnl = _last_pos.get("profit", 0)   # fallback
         exit_px = _last_pos.get("current_sl", 0)
         notifier.notify_trade_close(
             _last_pos, exit_px, pnl,
@@ -131,13 +138,18 @@ def run_cycle():
             "exit":  exit_px,
             "pnl":   pnl,
         })
-        logger.info("Posicion cerrada detectada | PnL aprox: %.2f", pnl)
+        logger.info("Posicion cerrada detectada | PnL: %.2f (balance %.2f -> %.2f)",
+                    pnl, _balance_at_entry or 0, account["balance"])
         _last_pos = None
+        _balance_at_entry = None
 
     if positions:
         pos = positions[0]   # dict del EA: ticket, type ("long"/"short"), sl, ...
         ptype  = pos.get("type", "long")
         cur_sl = pos.get("sl", 0)
+        # Capturar balance al detectar la posicion por primera vez (para PnL real)
+        if _last_pos is None:
+            _balance_at_entry = account["balance"]
         new_sl = strat.calc_trailing_sl(ptype, ema21, atr)
         # Solo mover SL a favor nunca en contra
         if ptype == "long" and new_sl > cur_sl:
@@ -189,6 +201,7 @@ def run_cycle():
         }
         sm.append_trade(trade_record)
         notifier.notify_trade_open(trade_record)
+        _balance_at_entry = account["balance"]   # para PnL real al cerrar
         active_trade = trade_record
 
     sm.save_state(account, signal, active_trade, ftmo)
