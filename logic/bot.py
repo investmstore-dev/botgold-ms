@@ -210,12 +210,16 @@ def run_cycle():
 def main():
     logger.info("=== BOT Mining Store GOLD iniciando ===")
 
-    if not mt5c.connect():
-        logger.error("No se pudo conectar a MT5. Verifica que MT5 este abierto.")
-        return
-
-    import os
     os.makedirs("data", exist_ok=True)
+
+    # Reintentar conexion en vez de rendirse: si MT5 abre tarde (ej. tras
+    # reiniciar el PC, el autostart corre antes que MT5 termine de cargar),
+    # el bot espera y reintenta hasta que el EA Bridge responda.
+    while not mt5c.connect():
+        logger.warning("MT5/EA no disponible aun. Reintentando en 30s "
+                       "(asegurate de tener MT5 abierto con el EA BotGold_Bridge).")
+        time.sleep(30)
+    logger.info("Conectado a MT5/EA Bridge — iniciando ciclos")
 
     try:
         while True:
